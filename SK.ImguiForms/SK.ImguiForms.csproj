@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWin32Manifest>true</NoWin32Manifest>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <NuGetAudit>False</NuGetAudit>
+    <AssemblyName>SK.ImguiForms</AssemblyName>
+    <RootNamespace>SK.ImguiForms</RootNamespace>
+    <Description>Native Win32 ImGui forms and target-following overlays for Windows.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.6" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.5.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.5.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Fonts\Font Awesome 7 Free-Solid-900.otf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Fonts\NotoMono-Regular.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
