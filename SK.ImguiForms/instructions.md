@@ -2,6 +2,8 @@
 
 This document is for AI agents that need to integrate `SK.ImguiForms` into another Windows .NET project.
 
+If you introduce a separate `agents.md` for agent workflow notes, reference it from this document so AI agents can discover it from the main integration guide.
+
 ## What this library provides
 
 `SK.ImguiForms` is a Win32 + Direct3D11 ImGui host with two explicit app models:

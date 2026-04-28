@@ -1,0 +1,1 @@
+- See [SK.ImguiForms/instructions.md](SK.ImguiForms/instructions.md) for integration instructions and agent guidance.
