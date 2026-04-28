@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.4.11626.88
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SK.ImguiForms.Example", "SK.ImguiForms.Example\SK.ImguiForms.Example.csproj", "{F58F1987-96B0-9EE1-400F-4B6002A1DD8E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SK.ImguiForms", "SK.ImguiForms\SK.ImguiForms.csproj", "{2C2D7DB7-0930-79F2-A55B-B031F956C542}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F58F1987-96B0-9EE1-400F-4B6002A1DD8E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F58F1987-96B0-9EE1-400F-4B6002A1DD8E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F58F1987-96B0-9EE1-400F-4B6002A1DD8E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F58F1987-96B0-9EE1-400F-4B6002A1DD8E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2C2D7DB7-0930-79F2-A55B-B031F956C542}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2C2D7DB7-0930-79F2-A55B-B031F956C542}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2C2D7DB7-0930-79F2-A55B-B031F956C542}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2C2D7DB7-0930-79F2-A55B-B031F956C542}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {7F35DFC4-58D9-49F0-A9AD-CED4DDBD44CA}
+	EndGlobalSection
+EndGlobal
