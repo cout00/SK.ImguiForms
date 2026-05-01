@@ -23,6 +23,10 @@
 
         protected unsafe ImguiOverlay(string windowTitle, bool dpiAware = true, int initialWindowWidth = 800, int initialWindowHeight = 600)
             : base(windowTitle, dpiAware, initialWindowWidth, initialWindowHeight) {
+            VSync = false;
+            FPSLimit = 60;
+            SmoothFramePacing = true;
+            PreferFlipSwapChain = false;
             Graphics = new SKOverlayGraphics(this);
             EnqueueFontUpdate(Graphics.LoadFonts);
         }

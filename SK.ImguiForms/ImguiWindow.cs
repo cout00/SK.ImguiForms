@@ -47,7 +47,18 @@
         int fpsLimit;
         int currentClientWidth;
         int currentClientHeight;
+        int frameTimingFrameCount;
         long lastRenderTimestamp;
+        long frameTimingLastReportTimestamp;
+        long frameTimingPreviousFrameTimestamp;
+        long frameTimingInputTicks;
+        long frameTimingIntervalTicks;
+        long frameTimingUpdateTicks;
+        long frameTimingDrawTicks;
+        long frameTimingPresentTicks;
+        long frameTimingTotalTicks;
+        long frameTimingMaxIntervalTicks;
+        long frameTimingMaxTotalTicks;
         int isRenderingFrame;
         volatile bool acceptsWindowMessages;
         float currentDpiScale;
@@ -107,6 +118,16 @@
         }
 
         public bool VSync;
+
+        public bool SmoothFramePacing { get; set; } = true;
+
+        public bool PreferFlipSwapChain { get; set; }
+
+        public bool FrameTimingDiagnosticsEnabled { get; set; }
+
+        public string FrameTimingDiagnosticsName { get; set; } = string.Empty;
+
+        public Action<string> FrameTimingDiagnosticsSink { get; set; }
 
         public int FPSLimit {
             get => fpsLimit;
@@ -497,6 +518,7 @@
         ID3D11RenderTargetView renderView;
         ImGuiRenderer renderer;
         ImGuiInputHandler inputHandler;
+        int swapChainBufferCount = 1;
 
         static TaskCompletionSource<bool> CreateCompletionSource() {
             return new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -637,6 +659,7 @@
             var clearColor = new Color4(0.0f);
 
             while(!token.IsCancellationRequested) {
+                var frameStartTimestamp = Stopwatch.GetTimestamp();
                 var deltaTime = stopwatch.ElapsedTicks / (float)Stopwatch.Frequency;
                 stopwatch.Restart();
 
@@ -655,12 +678,39 @@
 
                 var effectiveFpsLimit = GetActiveFpsLimit();
                 if(effectiveFpsLimit > 0) {
-                    var frameBudgetMs = 1000f / effectiveFpsLimit;
-                    var frameDurationMs = stopwatch.ElapsedTicks / (float)Stopwatch.Frequency * 1000f;
-                    var sleepTimeMs = (int)(frameBudgetMs - frameDurationMs);
-                    if(sleepTimeMs > 0) {
-                        Thread.Sleep(sleepTimeMs);
-                    }
+                    WaitForFrameBudget(frameStartTimestamp, effectiveFpsLimit);
+                }
+            }
+        }
+
+        void WaitForFrameBudget(long frameStartTimestamp, int effectiveFpsLimit) {
+            var frameBudgetTicks = Stopwatch.Frequency / effectiveFpsLimit;
+            var targetTimestamp = frameStartTimestamp + frameBudgetTicks;
+
+            if(!SmoothFramePacing) {
+                var remainingMs = (int)((targetTimestamp - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
+                if(remainingMs > 0) {
+                    Thread.Sleep(remainingMs);
+                }
+
+                return;
+            }
+
+            while(true) {
+                var remainingTicks = targetTimestamp - Stopwatch.GetTimestamp();
+                if(remainingTicks <= 0) {
+                    return;
+                }
+
+                var remainingMs = remainingTicks * 1000.0 / Stopwatch.Frequency;
+                if(remainingMs > 2.0) {
+                    Thread.Sleep(1);
+                }
+                else if(remainingMs > 0.5) {
+                    Thread.Yield();
+                }
+                else {
+                    Thread.SpinWait(10);
                 }
             }
         }
@@ -669,6 +719,20 @@
             if(Interlocked.Exchange(ref isRenderingFrame, 1) != 0) {
                 return;
             }
+
+            var measureFrameTiming = FrameTimingDiagnosticsEnabled;
+            var frameStartTimestamp = measureFrameTiming ? Stopwatch.GetTimestamp() : 0;
+            var frameIntervalTicks = measureFrameTiming && frameTimingPreviousFrameTimestamp != 0
+                ? frameStartTimestamp - frameTimingPreviousFrameTimestamp
+                : 0;
+            if(measureFrameTiming) {
+                frameTimingPreviousFrameTimestamp = frameStartTimestamp;
+            }
+
+            long inputEndTimestamp = 0;
+            long updateEndTimestamp = 0;
+            long drawEndTimestamp = 0;
+            long presentEndTimestamp = 0;
 
             try {
                 if(renderer == null || deviceContext == null || renderView == null || swapChain == null) {
@@ -680,20 +744,113 @@
                     Utils.SetOverlayClickable(Window.Handle, wantsMouseCapture);
                 }
 
+                if(measureFrameTiming) {
+                    inputEndTimestamp = Stopwatch.GetTimestamp();
+                }
+
                 renderer.Update(deltaTime, () => {
                     OnBeforeRender();
                     Render();
                     OnAfterRender();
                 });
 
+                if(measureFrameTiming) {
+                    updateEndTimestamp = Stopwatch.GetTimestamp();
+                }
+
                 deviceContext.OMSetRenderTargets(renderView);
                 deviceContext.ClearRenderTargetView(renderView, clearColor);
                 renderer.Render();
+
+                if(measureFrameTiming) {
+                    drawEndTimestamp = Stopwatch.GetTimestamp();
+                }
+
                 swapChain.Present(VSync ? 1 : 0, PresentFlags.None);
+
+                if(measureFrameTiming) {
+                    presentEndTimestamp = Stopwatch.GetTimestamp();
+                    RecordFrameTiming(
+                        frameIntervalTicks,
+                        inputEndTimestamp - frameStartTimestamp,
+                        updateEndTimestamp - inputEndTimestamp,
+                        drawEndTimestamp - updateEndTimestamp,
+                        presentEndTimestamp - drawEndTimestamp,
+                        presentEndTimestamp - frameStartTimestamp);
+                }
             }
             finally {
                 Interlocked.Exchange(ref isRenderingFrame, 0);
             }
+        }
+
+        void RecordFrameTiming(long intervalTicks, long inputTicks, long updateTicks, long drawTicks, long presentTicks, long totalTicks) {
+            var now = Stopwatch.GetTimestamp();
+            if(frameTimingLastReportTimestamp == 0) {
+                frameTimingLastReportTimestamp = now;
+            }
+
+            frameTimingFrameCount++;
+            frameTimingIntervalTicks += intervalTicks;
+            frameTimingInputTicks += inputTicks;
+            frameTimingUpdateTicks += updateTicks;
+            frameTimingDrawTicks += drawTicks;
+            frameTimingPresentTicks += presentTicks;
+            frameTimingTotalTicks += totalTicks;
+            frameTimingMaxIntervalTicks = Math.Max(frameTimingMaxIntervalTicks, intervalTicks);
+            frameTimingMaxTotalTicks = Math.Max(frameTimingMaxTotalTicks, totalTicks);
+
+            var reportElapsedTicks = now - frameTimingLastReportTimestamp;
+            if(reportElapsedTicks < Stopwatch.Frequency) {
+                return;
+            }
+
+            var frameCount = frameTimingFrameCount;
+            var elapsedSeconds = reportElapsedTicks / (double)Stopwatch.Frequency;
+            var diagnosticsName = string.IsNullOrWhiteSpace(FrameTimingDiagnosticsName)
+                ? GetType().Name
+                : FrameTimingDiagnosticsName;
+            var diagnostics = new ImguiFrameTimingDiagnostics(
+                diagnosticsName,
+                frameCount / elapsedSeconds,
+                TicksToMilliseconds(frameTimingIntervalTicks / frameCount),
+                TicksToMilliseconds(frameTimingMaxIntervalTicks),
+                TicksToMilliseconds(frameTimingTotalTicks / frameCount),
+                TicksToMilliseconds(frameTimingMaxTotalTicks),
+                TicksToMilliseconds(frameTimingInputTicks / frameCount),
+                TicksToMilliseconds(frameTimingUpdateTicks / frameCount),
+                TicksToMilliseconds(frameTimingDrawTicks / frameCount),
+                TicksToMilliseconds(frameTimingPresentTicks / frameCount),
+                VSync,
+                FPSLimit);
+            ImguiFrameTimingDiagnosticsRegistry.Set(diagnostics);
+
+            var message = string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{diagnosticsName}: fps={diagnostics.FramesPerSecond:0.0}, interval={diagnostics.AverageIntervalMilliseconds:0.###}ms, intervalMax={diagnostics.MaximumIntervalMilliseconds:0.###}ms, render={diagnostics.AverageRenderMilliseconds:0.###}ms, renderMax={diagnostics.MaximumRenderMilliseconds:0.###}ms, input={diagnostics.AverageInputMilliseconds:0.###}ms, imgui={diagnostics.AverageImguiMilliseconds:0.###}ms, d3d={diagnostics.AverageD3DMilliseconds:0.###}ms, present={diagnostics.AveragePresentMilliseconds:0.###}ms, vsync={VSync}, fpsLimit={FPSLimit}");
+
+            var sink = FrameTimingDiagnosticsSink;
+            if(sink != null) {
+                sink(message);
+            }
+            else {
+                Debug.WriteLine(message);
+            }
+
+            frameTimingLastReportTimestamp = now;
+            frameTimingFrameCount = 0;
+            frameTimingIntervalTicks = 0;
+            frameTimingInputTicks = 0;
+            frameTimingUpdateTicks = 0;
+            frameTimingDrawTicks = 0;
+            frameTimingPresentTicks = 0;
+            frameTimingTotalTicks = 0;
+            frameTimingMaxIntervalTicks = 0;
+            frameTimingMaxTotalTicks = 0;
+        }
+
+        static double TicksToMilliseconds(long ticks) {
+            return ticks * 1000.0 / Stopwatch.Frequency;
         }
 
         void OnResize(int width, int height) {
@@ -706,17 +863,7 @@
 
             if(renderView == null) {
                 using var dxgiFactory = device.QueryInterface<IDXGIDevice>().GetParent<IDXGIAdapter>().GetParent<IDXGIFactory>();
-                var swapChainDescription = new SwapChainDescription {
-                    BufferCount = 1,
-                    BufferDescription = new ModeDescription(width, height, format),
-                    Windowed = true,
-                    OutputWindow = Window.Handle,
-                    SampleDescription = new SampleDescription(1, 0),
-                    SwapEffect = SwapEffect.Discard,
-                    BufferUsage = Usage.RenderTargetOutput
-                };
-
-                swapChain = dxgiFactory.CreateSwapChain(device, swapChainDescription);
+                swapChain = CreateSwapChain(dxgiFactory, width, height);
                 dxgiFactory.MakeWindowAssociation(Window.Handle, WindowAssociationFlags.IgnoreAll);
                 backBuffer = swapChain.GetBuffer<ID3D11Texture2D>(0);
                 renderView = device.CreateRenderTargetView(backBuffer);
@@ -726,12 +873,40 @@
                 deviceContext.Flush();
                 renderView.Dispose();
                 backBuffer.Dispose();
-                swapChain.ResizeBuffers(1, width, height, format, SwapChainFlags.None);
+                swapChain.ResizeBuffers(swapChainBufferCount, width, height, format, SwapChainFlags.None);
                 backBuffer = swapChain.GetBuffer<ID3D11Texture2D>(0);
                 renderView = device.CreateRenderTargetView(backBuffer);
             }
 
             renderer.Resize(width, height);
+        }
+
+        IDXGISwapChain CreateSwapChain(IDXGIFactory dxgiFactory, int width, int height) {
+            if(PreferFlipSwapChain) {
+                try {
+                    swapChainBufferCount = 2;
+                    return dxgiFactory.CreateSwapChain(device, CreateSwapChainDescription(width, height, 2, SwapEffect.FlipDiscard));
+                }
+                catch {
+                    swapChainBufferCount = 1;
+                    PreferFlipSwapChain = false;
+                }
+            }
+
+            swapChainBufferCount = 1;
+            return dxgiFactory.CreateSwapChain(device, CreateSwapChainDescription(width, height, 1, SwapEffect.Discard));
+        }
+
+        SwapChainDescription CreateSwapChainDescription(int width, int height, int bufferCount, SwapEffect swapEffect) {
+            return new SwapChainDescription {
+                BufferCount = bufferCount,
+                BufferDescription = new ModeDescription(width, height, format),
+                Windowed = true,
+                OutputWindow = Window.Handle,
+                SampleDescription = new SampleDescription(1, 0),
+                SwapEffect = swapEffect,
+                BufferUsage = Usage.RenderTargetOutput
+            };
         }
 
         void UpdateWindowBoundsFromHandle() {
