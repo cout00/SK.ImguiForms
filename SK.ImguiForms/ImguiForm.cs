@@ -1,6 +1,7 @@
-﻿namespace SK.ImguiForms {
+namespace SK.ImguiForms {
     using System;
     using System.Collections.Generic;
+    using System.ComponentModel;
     using System.Drawing;
     using System.IO;
     using System.Numerics;
@@ -8,6 +9,9 @@
     using ImGuiNET;
     using SK.ImguiForms.Win32;
     using SKFramework;
+
+    public sealed class CloseEventArgs : CancelEventArgs {
+    }
 
     public abstract class ImguiForm : ImguiWindow {
         readonly List<RECT> dragRegions = [];
@@ -110,6 +114,11 @@
 
         protected override bool TryHandleWindowMessage(WindowMessage message, UIntPtr wParam, IntPtr lParam, out IntPtr result) {
             switch(message) {
+                case WindowMessage.Close:
+                    RequestClose();
+                    result = IntPtr.Zero;
+                    return true;
+
                 case WindowMessage.NcCalcSize:
                     result = IntPtr.Zero;
                     return true;
@@ -500,7 +509,15 @@
             }
 
             if(ShowCloseButton && Graphics.IconButton("window-close", 0x00d, IconSize.Small, iconButtonSize, "Close")) {
-                OnCloseRequested();
+                RequestClose();
+            }
+        }
+
+        void RequestClose() {
+            var eventArgs = new CloseEventArgs();
+            OnCloseRequested(eventArgs);
+            if(!eventArgs.Cancel) {
+                Close();
             }
         }
 
@@ -632,8 +649,7 @@
         protected virtual void OnShellInitialized() {
         }
 
-        protected virtual void OnCloseRequested() {
-            Close();
+        protected virtual void OnCloseRequested(CloseEventArgs e) {
         }
 
         protected virtual void OnMinimizeRequested() {
