@@ -7,6 +7,7 @@
     using SKFramework;
 
     public abstract class ImguiOverlay : ImguiWindow {
+        static readonly nint HWND_TOP = new(0);
         static readonly nint HWND_TOPMOST = new(-1);
         static readonly nint HWND_NOTOPMOST = new(-2);
 
@@ -16,6 +17,7 @@
         bool isOverlayWindowVisible;
         Rectangle currentBounds;
         bool hasCurrentBounds;
+        ImguiOverlayAttachmentMode attachmentMode;
         Process targetProcess;
         string targetProcessName = string.Empty;
         DateTime targetProcessSearchStartUtc;
@@ -49,6 +51,18 @@
         protected override bool UseClickThrough => true;
 
         protected virtual bool UseTargetClientBounds => true;
+
+        public ImguiOverlayAttachmentMode AttachmentMode {
+            get => attachmentMode;
+            set {
+                if(attachmentMode == value) {
+                    return;
+                }
+
+                attachmentMode = value;
+                currentZOrderTargetWindowHandle = 0;
+            }
+        }
 
         public void AttachToProcess(Process process) {
             ArgumentNullException.ThrowIfNull(process);
@@ -146,7 +160,9 @@
         }
 
         protected virtual nint GetOwnerWindowHandle(nint targetWindowHandle) {
-            return GetZOrderTargetWindowHandle(targetWindowHandle);
+            return AttachmentMode == ImguiOverlayAttachmentMode.OwnedByTarget
+                ? GetZOrderTargetWindowHandle(targetWindowHandle)
+                : 0;
         }
 
         void SyncOverlayWindow(nint targetWindowHandle, Rectangle bounds) {
@@ -165,7 +181,11 @@
             }
 
             var ownerWindowHandle = GetOwnerWindowHandle(targetWindowHandle);
-            if(ownerWindowHandle != 0 && ownerWindowHandle != Window.Handle && ownerWindowHandle != currentOwnerWindowHandle) {
+            if(ownerWindowHandle == Window.Handle) {
+                ownerWindowHandle = 0;
+            }
+
+            if(ownerWindowHandle != currentOwnerWindowHandle) {
                 User32.SetWindowLongHandle(Window.Handle, (int)WindowLongParam.GWLP_HWNDPARENT, ownerWindowHandle);
                 currentOwnerWindowHandle = ownerWindowHandle;
             }
@@ -191,22 +211,47 @@
                 Window.Dimensions = bounds;
             }
 
-            if(currentZOrderTargetWindowHandle != zOrderTargetWindowHandle || !hasCurrentBounds || currentBounds != bounds || !isOverlayWindowVisible) {
+            var zOrderNeedsSync = AttachmentMode == ImguiOverlayAttachmentMode.Independent && !IsOverlayImmediatelyAboveTarget(zOrderTargetWindowHandle);
+            if(currentZOrderTargetWindowHandle != zOrderTargetWindowHandle || !hasCurrentBounds || currentBounds != bounds || !isOverlayWindowVisible || zOrderNeedsSync) {
+                var flags = SetWindowPosFlags.SHOWWINDOW
+                    | SetWindowPosFlags.NOACTIVATE
+                    | SetWindowPosFlags.ASYNCWINDOWPOS;
+                var insertAfter = GetOverlayInsertAfterWindow(zOrderTargetWindowHandle);
+                if(insertAfter == 0) {
+                    flags |= SetWindowPosFlags.NOZORDER;
+                }
+
                 User32.SetWindowPos(
                     Window.Handle,
-                    zOrderTargetWindowHandle,
+                    insertAfter,
                     bounds.X,
                     bounds.Y,
                     bounds.Width,
                     bounds.Height,
-                    SetWindowPosFlags.SHOWWINDOW
-                    | SetWindowPosFlags.NOACTIVATE
-                    | SetWindowPosFlags.ASYNCWINDOWPOS);
+                    flags);
                 currentZOrderTargetWindowHandle = zOrderTargetWindowHandle;
                 currentBounds = bounds;
                 hasCurrentBounds = true;
                 isOverlayWindowVisible = true;
             }
+        }
+
+        bool IsOverlayImmediatelyAboveTarget(nint zOrderTargetWindowHandle) {
+            return AttachmentMode != ImguiOverlayAttachmentMode.Independent
+                || User32.GetWindow(zOrderTargetWindowHandle, GetWindowCommand.GW_HWNDPREV) == Window.Handle;
+        }
+
+        nint GetOverlayInsertAfterWindow(nint zOrderTargetWindowHandle) {
+            if(AttachmentMode == ImguiOverlayAttachmentMode.OwnedByTarget) {
+                return zOrderTargetWindowHandle;
+            }
+
+            var windowAboveTarget = User32.GetWindow(zOrderTargetWindowHandle, GetWindowCommand.GW_HWNDPREV);
+            if(windowAboveTarget == Window.Handle) {
+                return 0;
+            }
+
+            return windowAboveTarget != 0 ? windowAboveTarget : HWND_TOP;
         }
 
         void HideOverlayWindow() {

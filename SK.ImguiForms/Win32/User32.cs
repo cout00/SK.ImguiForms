@@ -356,6 +356,11 @@ namespace SK.ImguiForms.Win32
         DWLP_DLGPROC = 4
     }
 
+    public enum GetWindowCommand : uint
+    {
+        GW_HWNDPREV = 3
+    }
+
     public enum VK
     {
         ///<summary>
@@ -1283,6 +1288,9 @@ namespace SK.ImguiForms.Win32
 
         [DllImport(LibraryName)]
         public static extern IntPtr SetFocus(IntPtr hWnd);
+
+        [DllImport(LibraryName, ExactSpelling = true)]
+        public static extern IntPtr GetWindow(IntPtr hWnd, GetWindowCommand uCmd);
 
         [DllImport(LibraryName, ExactSpelling = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
