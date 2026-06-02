@@ -378,7 +378,6 @@
 
                 case WindowMessage.DpiChanged:
                     UpdateDpiScale();
-                    ReplaceFontIfRequired();
                     EnsureRenderSizeMatchesClientRect();
                     break;
 

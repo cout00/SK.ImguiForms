@@ -187,7 +187,7 @@
                                 continue;
                             }
 
-                            ctx.RSSetScissorRect(clipMinX, clipMinY, clipMaxX, clipMaxY);
+                            ctx.RSSetScissorRect(new Vortice.RawRect(clipMinX, clipMinY, clipMaxX, clipMaxY));
 
                             if(textureResources.TryGetValue(cmd.GetTexID(), out var texture)) {
                                 ctx.PSSetShaderResource(0, texture);
