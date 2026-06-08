@@ -11,8 +11,13 @@
         static readonly nint HWND_TOPMOST = new(-1);
         static readonly nint HWND_NOTOPMOST = new(-2);
 
+        const long AnchorResolveIntervalMs = 200;
+
         nint currentOwnerWindowHandle;
         nint currentZOrderTargetWindowHandle;
+        nint cachedSiblingAnchor;
+        nint lastAnchorBaseTarget;
+        long lastAnchorResolveTick;
         bool? currentTopMostState;
         bool isOverlayWindowVisible;
         Rectangle currentBounds;
@@ -74,6 +79,9 @@
             TargetWindowHandle = 0;
             currentZOrderTargetWindowHandle = 0;
             currentOwnerWindowHandle = 0;
+            cachedSiblingAnchor = 0;
+            lastAnchorBaseTarget = 0;
+            lastAnchorResolveTick = 0;
             currentBounds = Rectangle.Empty;
             hasCurrentBounds = false;
         }
@@ -170,14 +178,23 @@
                 return;
             }
 
-            var zOrderTargetWindowHandle = GetZOrderTargetWindowHandle(targetWindowHandle);
-            if(targetWindowHandle == 0 || zOrderTargetWindowHandle == 0 || targetWindowHandle == Window.Handle || zOrderTargetWindowHandle == Window.Handle || bounds.Width <= 0 || bounds.Height <= 0) {
+            var baseZOrderTarget = GetZOrderTargetWindowHandle(targetWindowHandle);
+            if(targetWindowHandle == 0 || baseZOrderTarget == 0 || targetWindowHandle == Window.Handle || baseZOrderTarget == Window.Handle || bounds.Width <= 0 || bounds.Height <= 0) {
                 TargetWindowHandle = 0;
                 hasCurrentBounds = false;
                 currentBounds = Rectangle.Empty;
                 currentZOrderTargetWindowHandle = 0;
                 HideOverlayWindow();
                 return;
+            }
+
+            // In Independent mode the overlay must sit above the game window AND above any sibling
+            // overlay attached to it (e.g. the native in-game overlay, which owns the slot directly
+            // above the game window). Anchoring our z-order to that top-most sibling instead of the
+            // game window itself ends the per-frame z-order ping-pong that causes flicker.
+            var zOrderAnchor = baseZOrderTarget;
+            if(AttachmentMode == ImguiOverlayAttachmentMode.Independent) {
+                zOrderAnchor = ResolveZOrderAnchor(baseZOrderTarget);
             }
 
             var ownerWindowHandle = GetOwnerWindowHandle(targetWindowHandle);
@@ -190,7 +207,9 @@
                 currentOwnerWindowHandle = ownerWindowHandle;
             }
 
-            var targetExStyle = (WindowExStyles)User32.GetWindowLong(zOrderTargetWindowHandle, (int)WindowLongParam.GWL_EXSTYLE);
+            // Mirror the game window's topmost state (not the anchor's): the native overlay already
+            // mirrors the game, and reading the game window keeps this correct even mid-transition.
+            var targetExStyle = (WindowExStyles)User32.GetWindowLong(baseZOrderTarget, (int)WindowLongParam.GWL_EXSTYLE);
             var shouldBeTopMost = targetExStyle.HasFlag(WindowExStyles.WS_EX_TOPMOST);
             if(currentTopMostState != shouldBeTopMost) {
                 User32.SetWindowPos(
@@ -211,12 +230,12 @@
                 Window.Dimensions = bounds;
             }
 
-            var zOrderNeedsSync = AttachmentMode == ImguiOverlayAttachmentMode.Independent && !IsOverlayImmediatelyAboveTarget(zOrderTargetWindowHandle);
-            if(currentZOrderTargetWindowHandle != zOrderTargetWindowHandle || !hasCurrentBounds || currentBounds != bounds || !isOverlayWindowVisible || zOrderNeedsSync) {
+            var zOrderNeedsSync = AttachmentMode == ImguiOverlayAttachmentMode.Independent && !IsOverlayImmediatelyAboveTarget(zOrderAnchor);
+            if(currentZOrderTargetWindowHandle != zOrderAnchor || !hasCurrentBounds || currentBounds != bounds || !isOverlayWindowVisible || zOrderNeedsSync) {
                 var flags = SetWindowPosFlags.SHOWWINDOW
                     | SetWindowPosFlags.NOACTIVATE
                     | SetWindowPosFlags.ASYNCWINDOWPOS;
-                var insertAfter = GetOverlayInsertAfterWindow(zOrderTargetWindowHandle);
+                var insertAfter = GetOverlayInsertAfterWindow(zOrderAnchor);
                 if(insertAfter == 0) {
                     flags |= SetWindowPosFlags.NOZORDER;
                 }
@@ -229,11 +248,32 @@
                     bounds.Width,
                     bounds.Height,
                     flags);
-                currentZOrderTargetWindowHandle = zOrderTargetWindowHandle;
+                currentZOrderTargetWindowHandle = zOrderAnchor;
                 currentBounds = bounds;
                 hasCurrentBounds = true;
                 isOverlayWindowVisible = true;
             }
+        }
+
+        // Returns the top-most sibling overlay attached to the game window to anchor our z-order
+        // above, falling back to the game window itself when none exists. Throttled so the
+        // EnumWindows sweep does not run on every frame; recomputed immediately when the cached
+        // anchor dies or the base target changes.
+        nint ResolveZOrderAnchor(nint baseTarget) {
+            var now = Environment.TickCount64;
+            var cachedDead = cachedSiblingAnchor != 0 &&
+                (!User32.IsWindow(cachedSiblingAnchor) ||
+                 User32.GetWindow(cachedSiblingAnchor, GetWindowCommand.GW_OWNER) != baseTarget);
+
+            if(cachedDead || baseTarget != lastAnchorBaseTarget || now - lastAnchorResolveTick >= AnchorResolveIntervalMs) {
+                cachedSiblingAnchor = OverlayZOrderResolver.TryFindTopmostSiblingOverlay(baseTarget, Window.Handle, out var sibling)
+                    ? sibling
+                    : 0;
+                lastAnchorBaseTarget = baseTarget;
+                lastAnchorResolveTick = now;
+            }
+
+            return cachedSiblingAnchor != 0 ? cachedSiblingAnchor : baseTarget;
         }
 
         bool IsOverlayImmediatelyAboveTarget(nint zOrderTargetWindowHandle) {

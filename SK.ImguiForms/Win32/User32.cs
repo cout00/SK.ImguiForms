@@ -358,7 +358,9 @@ namespace SK.ImguiForms.Win32
 
     public enum GetWindowCommand : uint
     {
-        GW_HWNDPREV = 3
+        GW_HWNDNEXT = 2,
+        GW_HWNDPREV = 3,
+        GW_OWNER = 4
     }
 
     public enum VK

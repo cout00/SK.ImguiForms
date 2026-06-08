@@ -925,6 +925,22 @@
             return dpi == 0 ? 1f : dpi / 96f;
         }
 
+        // The "base" scale factor folded into EffectiveUiScale (alongside the user
+        // interface-size preset). Defaults to the window's OS DPI scale. The
+        // transparent HUD overlay overrides this to use the in-game UI scale
+        // instead, so HUD elements match the game's UI and don't double-scale with
+        // DPI (the game UI scale already tracks DPI).
+        protected virtual float ResolveBaseScaleFactor() {
+            return GetWindowDpiScale();
+        }
+
+        // Re-evaluate the effective UI scale now (picks up a changed
+        // ResolveBaseScaleFactor) and rescale style/fonts if it moved. Cheap no-op
+        // when nothing changed (UpdateDpiScale's own threshold guard).
+        protected void RequestUiScaleRefresh() {
+            UpdateDpiScale();
+        }
+
         float GetEffectiveUiScale() {
             return MathF.Max(MinimumInterfaceScale, DpiScale * userInterfaceScale * BaseUiScaleMultiplier);
         }
@@ -951,7 +967,7 @@
                 }
 
                 var previousContext = ImGui.GetCurrentContext();
-                var dpiScale = GetWindowDpiScale();
+                var dpiScale = ResolveBaseScaleFactor();
                 var effectiveScale = MathF.Max(MinimumInterfaceScale, dpiScale * userInterfaceScale * BaseUiScaleMultiplier);
                 var effectiveScaleChanged = MathF.Abs(effectiveScale - appliedStyleScale) > 0.001f;
                 if(!effectiveScaleChanged && !styleIsUnscaled) {
