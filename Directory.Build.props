@@ -1,0 +1,8 @@
+<Project>
+  <!-- SK.ImguiForms lives outside the SK.Sharp\ tree, so it does not inherit the shared build matrix
+       on its own. Import it here so this project exposes the same 32 configurations that the SK
+       solutions reference — otherwise VS errors ("project configuration ... does not exist") because
+       a bare SDK project only has Debug|AnyCPU / Release|AnyCPU. ImGui has no SK #if symbols, so the
+       product/PoE defines this pulls in are harmless; it just gets the right Optimize/DebugType. -->
+  <Import Project="$(MSBuildThisFileDirectory)..\SK.Build.props" />
+</Project>
