@@ -1,7 +1,7 @@
-﻿namespace SK.ImguiForms {
-    using ImGuiNET;
+namespace SK.ImguiForms {
+    using Hexa.NET.ImGui;
 
     public static class FontHelper {
-        public unsafe delegate void FontLoadDelegate(ImFontConfig* fontConfig);
+        public delegate void FontLoadDelegate(ImFontConfigPtr fontConfig);
     }
 }

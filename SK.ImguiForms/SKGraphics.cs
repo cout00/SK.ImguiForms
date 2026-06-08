@@ -1,10 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SK.ImguiForms;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -32,15 +31,17 @@ namespace SKFramework {
         const float SmallIconFontSize = 14f;
         const float MediumIconFontSize = 20f;
         const float LargeIconFontSize = 28f;
-        const int MinTextFontAtlasSize = 12;
-        const int MaxTextFontAtlasSize = 34;
-        readonly object iconFontsLock = new();
-        readonly Dictionary<float, ImFontPtr> iconFonts = new();
-        readonly HashSet<float> pendingIconFontSizes = new();
-        readonly object textFontsLock = new();
-        readonly Dictionary<int, ImFontPtr> textFonts = new();
+        // Nominal pixel size the fonts are registered at. With Dear ImGui 1.92 fonts are scalable, so this is
+        // only a baseline — actual render size is chosen per draw via PushFont(font, size) / AddText(font, size).
+        const float FontLoadSize = 16f;
+        // Kept only for GetAvailableTextFontSizesDescending/GetClosestTextFontSize size enumeration helpers.
+        const int MinTextFontSize = 12;
+        const int MaxTextFontSize = 34;
         static string iconFontPath;
         static string textFontPath;
+        static string cjkFontPath;
+        // Single merged font: NotoMono (Latin/Cyrillic) + Microsoft YaHei (CJK, on-demand) + Font Awesome (icons).
+        ImFontPtr font;
 
         protected SKGraphics(ImguiWindow overlay) {
             this.overlay = overlay;
@@ -71,69 +72,14 @@ namespace SKFramework {
             };
         }
 
-        static float NormalizeIconFontSize(float fontSize) {
-            return MathF.Round(MathF.Max(1f, fontSize), 2);
-        }
-
-        static bool TryResolveFontPaths(out string textFontPath, out string fontAwesomePath) {
-            textFontPath = Path.Combine(Path.Combine(AppContext.BaseDirectory, "Fonts"), "NotoMono-Regular.ttf");
-            fontAwesomePath = Path.Combine(Path.Combine(AppContext.BaseDirectory, "Fonts"), "Font Awesome 7 Free-Solid-900.otf");
-            if(!File.Exists(textFontPath) || !File.Exists(fontAwesomePath)) {
-                return false;
-            }
-
-            SKGraphics.textFontPath = textFontPath;
-            iconFontPath = fontAwesomePath;
-            return true;
-        }
-
-        bool TryGetCachedIconFont(float fontSize, out ImFontPtr font) {
-            lock(iconFontsLock) {
-                return iconFonts.TryGetValue(fontSize, out font);
-            }
-        }
-
-        void ResetFontCache() {
-            lock(iconFontsLock) {
-                iconFonts.Clear();
-                pendingIconFontSizes.Clear();
-            }
-
-            lock(textFontsLock) {
-                textFonts.Clear();
-            }
-        }
-
-        unsafe ImFontPtr CacheIconFont(float fontSize, ImFontPtr font) {
-            lock(iconFontsLock) {
-                pendingIconFontSizes.Remove(fontSize);
-                if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                    iconFonts[fontSize] = font;
-                }
-
-                return font;
-            }
-        }
-
-        void ClearPendingIconFont(float fontSize) {
-            lock(iconFontsLock) {
-                pendingIconFontSizes.Remove(fontSize);
-            }
-        }
-
-        bool TryBeginIconFontLoad(float fontSize) {
-            lock(iconFontsLock) {
-                if(iconFonts.ContainsKey(fontSize) || pendingIconFontSizes.Contains(fontSize)) {
-                    return false;
-                }
-
-                pendingIconFontSizes.Add(fontSize);
-                return true;
-            }
-        }
-
-        static bool TryEnqueueFontUpdate(ImguiWindow overlay, FontHelper.FontLoadDelegate fontLoadDelegate) {
-            return overlay != null && overlay.ReplaceFont(fontLoadDelegate);
+        static bool TryResolveFontPaths() {
+            var fontsDir = Path.Combine(AppContext.BaseDirectory, "Fonts");
+            textFontPath = Path.Combine(fontsDir, "NotoMono-Regular.ttf");
+            iconFontPath = Path.Combine(fontsDir, "Font Awesome 7 Free-Solid-900.otf");
+            // CJK glyphs come from the Windows system font (Microsoft YaHei); not bundled (licensing).
+            var cjk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "msyh.ttc");
+            cjkFontPath = File.Exists(cjk) ? cjk : null;
+            return File.Exists(textFontPath) && File.Exists(iconFontPath);
         }
 
         float GetScaledFontSize(float fontSize) {
@@ -142,125 +88,41 @@ namespace SKFramework {
                 : MathF.Max(1f, MathF.Round(fontSize));
         }
 
-        unsafe ImFontPtr CreateIconFont(ImFontConfig* fontConfig, float fontSize) {
-            if(string.IsNullOrWhiteSpace(iconFontPath) || !File.Exists(iconFontPath)) {
-                return default;
-            }
-
-            var prevMergeMode = fontConfig->MergeMode;
-            var prevPixelSnapH = fontConfig->PixelSnapH;
-            var prevGlyphMinAdvanceX = fontConfig->GlyphMinAdvanceX;
-
-            try {
-                fontConfig->MergeMode = 0;
-                fontConfig->PixelSnapH = 1;
-                fontConfig->GlyphMinAdvanceX = 0f;
-
-                ushort[] iconRanges = [0xe000, 0xf8ff, 0];
-                fixed(ushort* glyphRanges = iconRanges) {
-                    return ImGui.GetIO().Fonts.AddFontFromFileTTF(iconFontPath, GetScaledFontSize(fontSize), new ImFontConfigPtr(fontConfig), (IntPtr)glyphRanges);
-                }
-            }
-            finally {
-                fontConfig->MergeMode = prevMergeMode;
-                fontConfig->PixelSnapH = prevPixelSnapH;
-                fontConfig->GlyphMinAdvanceX = prevGlyphMinAdvanceX;
-            }
-        }
-
-        unsafe ImFontPtr CreateTextFont(ImFontConfig* fontConfig, float fontSize) {
-            if(string.IsNullOrWhiteSpace(textFontPath) || !File.Exists(textFontPath)) {
-                return default;
-            }
-
-            return ImGui.GetIO().Fonts.AddFontFromFileTTF(textFontPath, GetScaledFontSize(fontSize), new ImFontConfigPtr(fontConfig), ImGui.GetIO().Fonts.GetGlyphRangesCyrillic());
-        }
-
-        unsafe void CacheTextFont(int fontSize, ImFontPtr font) {
-            lock(textFontsLock) {
-                if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                    textFonts[fontSize] = font;
-                }
-            }
-        }
-
-        bool TryGetCachedTextFont(int fontSize, out ImFontPtr font) {
-            lock(textFontsLock) {
-                return textFonts.TryGetValue(fontSize, out font);
-            }
-        }
-
-        static int NormalizeTextFontSize(float fontSize) {
-            return (int)Math.Clamp(MathF.Round(fontSize), MinTextFontAtlasSize, MaxTextFontAtlasSize);
-        }
-
-
-        public unsafe void LoadFonts(ImFontConfig* fontConfig) {
-            if(!TryResolveFontPaths(out var textFontPath, out var fontAwesomePath)) {
+        // Builds this context's font atlas. Dear ImGui 1.92 rasterizes glyphs on demand at any size, so we add
+        // each face exactly once (no per-size caches). CJK/Latin merge by glyph coverage; Font Awesome is
+        // restricted to the icon PUA range so it doesn't shadow text glyphs.
+        public unsafe void LoadFonts(ImFontConfigPtr fontConfig) {
+            if(!TryResolveFontPaths()) {
                 return;
             }
 
             var io = ImGui.GetIO();
-            ResetFontCache();
-            float[] pendingIconSizes;
-            lock(iconFontsLock) {
-                pendingIconSizes = pendingIconFontSizes.ToArray();
+
+            font = io.Fonts.AddFontFromFileTTF(textFontPath, FontLoadSize, fontConfig);
+
+            if(cjkFontPath != null) {
+                fontConfig.MergeMode = true;
+                io.Fonts.AddFontFromFileTTF(cjkFontPath, FontLoadSize, fontConfig);
+                fontConfig.MergeMode = false;
             }
 
-            io.Fonts.AddFontFromFileTTF(textFontPath, GetScaledFontSize(20f), new ImFontConfigPtr(fontConfig), io.Fonts.GetGlyphRangesCyrillic());
-
-            for(int fontSize = MinTextFontAtlasSize; fontSize <= MaxTextFontAtlasSize; fontSize++) {
-                CacheTextFont(fontSize, CreateTextFont(fontConfig, fontSize));
+            uint[] iconRanges = [0xe000, 0xf8ff, 0];
+            fixed(uint* glyphRanges = iconRanges) {
+                fontConfig.MergeMode = true;
+                io.Fonts.AddFontFromFileTTF(iconFontPath, FontLoadSize, fontConfig, glyphRanges);
+                fontConfig.MergeMode = false;
             }
-
-            var prevMergeMode = fontConfig->MergeMode;
-            var prevPixelSnapH = fontConfig->PixelSnapH;
-            var prevGlyphMinAdvanceX = fontConfig->GlyphMinAdvanceX;
-
-            fontConfig->MergeMode = 1;
-            fontConfig->PixelSnapH = 1;
-            fontConfig->GlyphMinAdvanceX = GetScaledFontSize(20f);
-
-            ushort[] iconRanges = [0xe000, 0xf8ff, 0];
-            fixed(ushort* glyphRanges = iconRanges) {
-                var iconRangePtr = (IntPtr)glyphRanges;
-                io.Fonts.AddFontFromFileTTF(fontAwesomePath, GetScaledFontSize(20f), new ImFontConfigPtr(fontConfig), iconRangePtr);
-            }
-
-            CacheIconFont(NormalizeIconFontSize(SmallIconFontSize), CreateIconFont(fontConfig, SmallIconFontSize));
-            CacheIconFont(NormalizeIconFontSize(MediumIconFontSize), CreateIconFont(fontConfig, MediumIconFontSize));
-            CacheIconFont(NormalizeIconFontSize(LargeIconFontSize), CreateIconFont(fontConfig, LargeIconFontSize));
-            foreach(var pendingIconSize in pendingIconSizes) {
-                var normalizedSize = NormalizeIconFontSize(pendingIconSize);
-                if(normalizedSize == NormalizeIconFontSize(SmallIconFontSize) ||
-                   normalizedSize == NormalizeIconFontSize(MediumIconFontSize) ||
-                   normalizedSize == NormalizeIconFontSize(LargeIconFontSize)) {
-                    continue;
-                }
-
-                CacheIconFont(normalizedSize, CreateIconFont(fontConfig, normalizedSize));
-            }
-
-            fontConfig->MergeMode = prevMergeMode;
-            fontConfig->PixelSnapH = prevPixelSnapH;
-            fontConfig->GlyphMinAdvanceX = prevGlyphMinAdvanceX;
         }
 
         protected ImFontPtr GetIconFont(IconSize size) {
-            return GetIconFont(GetIconFontSize(size));
+            return font;
         }
 
         protected ImFontPtr GetIconFont(float fontSize) {
-            fontSize = NormalizeIconFontSize(fontSize);
-            if(TryGetCachedIconFont(fontSize, out var font)) {
-                return font;
-            }
-
-            EnsureIconFontLoaded(fontSize);
-            return TryGetCachedIconFont(fontSize, out font) ? font : default;
+            return font;
         }
 
-        public static IEnumerable<int> GetAvailableTextFontSizesDescending(float maxFontSize, float minFontSize = MinTextFontAtlasSize) {
+        public static IEnumerable<int> GetAvailableTextFontSizesDescending(float maxFontSize, float minFontSize = MinTextFontSize) {
             int normalizedMax = NormalizeTextFontSize(maxFontSize);
             int normalizedMin = NormalizeTextFontSize(minFontSize);
             for(int fontSize = normalizedMax; fontSize >= normalizedMin; fontSize--) {
@@ -268,50 +130,37 @@ namespace SKFramework {
             }
         }
 
+        static int NormalizeTextFontSize(float fontSize) {
+            return (int)Math.Clamp(MathF.Round(fontSize), MinTextFontSize, MaxTextFontSize);
+        }
+
         public static int GetClosestTextFontSize(float fontSize) {
             return NormalizeTextFontSize(fontSize);
         }
 
         public ImFontPtr GetTextFont(float fontSize) {
-            var normalizedFontSize = NormalizeTextFontSize(fontSize);
-            return TryGetCachedTextFont(normalizedFontSize, out var font) ? font : default;
+            return font;
         }
 
-        public unsafe float GetResolvedTextFontSize(float fontSize) {
-            var font = GetTextFont(fontSize);
-            return (IntPtr)font.NativePtr != IntPtr.Zero ? font.FontSize : ImGui.GetFont().FontSize;
+        public float GetResolvedTextFontSize(float fontSize) {
+            return GetScaledFontSize(fontSize);
         }
 
-        public unsafe Vector2 MeasureText(string text, float fontSize) {
+        public Vector2 MeasureText(string text, float fontSize) {
             if(string.IsNullOrEmpty(text)) {
                 return Vector2.Zero;
             }
 
-            var font = GetTextFont(fontSize);
-            if((IntPtr)font.NativePtr == IntPtr.Zero) {
+            if(font.IsNull) {
                 return ImGui.CalcTextSize(text);
             }
 
-            ImGui.PushFont(font);
+            ImGui.PushFont(font, GetScaledFontSize(fontSize));
             try {
                 return ImGui.CalcTextSize(text);
             }
             finally {
                 ImGui.PopFont();
-            }
-        }
-
-        unsafe void EnsureIconFontLoaded(float fontSize) {
-            if(!TryResolveFontPaths(out _, out _)) {
-                return;
-            }
-
-            if(!TryBeginIconFontLoad(fontSize)) {
-                return;
-            }
-
-            if(!TryEnqueueFontUpdate(overlay, LoadFonts)) {
-                ClearPendingIconFont(fontSize);
             }
         }
 
@@ -331,17 +180,16 @@ namespace SKFramework {
             return ToIconGlyph(iconNumber);
         }
 
-        public unsafe Vector2 MeasureIconGlyph(string glyph, IconSize size) {
+        public Vector2 MeasureIconGlyph(string glyph, IconSize size) {
             if(string.IsNullOrEmpty(glyph)) {
                 return Vector2.Zero;
             }
 
-            var font = GetIconFont(size);
-            if((IntPtr)font.NativePtr == IntPtr.Zero) {
+            if(font.IsNull) {
                 return ImGui.CalcTextSize(glyph);
             }
 
-            ImGui.PushFont(font);
+            ImGui.PushFont(font, GetScaledFontSize(GetIconFontSize(size)));
             try {
                 return ImGui.CalcTextSize(glyph);
             }
@@ -385,40 +233,36 @@ namespace SKFramework {
             _drawList.AddText(position, col, text);
         }
 
-        public unsafe void DrawText(Vector2 position, Color color, string text, ImFontPtr font) {
-            uint col = ColorRGBA(color.R, color.G, color.B, color.A);
-            position = SnapTextPosition(position);
-            if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                _drawList.AddText(font, font.FontSize, position, col, text);
-            }
-            else {
-                _drawList.AddText(position, col, text);
-            }
+        public void DrawText(Vector2 position, Color color, string text, ImFontPtr font) {
+            AddTextToDrawList(_drawList, position, color, text, font, ImGui.GetFontSize());
         }
 
-        public unsafe void DrawText(Vector2 position, Color color, string text, float fontSize) {
-            DrawText(position, color, text, GetTextFont(fontSize));
+        public void DrawText(Vector2 position, Color color, string text, float fontSize) {
+            AddTextToDrawList(_drawList, position, color, text, font, GetScaledFontSize(fontSize));
         }
 
-        protected unsafe void AddTextToDrawList(ImDrawListPtr drawList, Vector2 position, Color color, string text, ImFontPtr font) {
+        protected void AddTextToDrawList(ImDrawListPtr drawList, Vector2 position, Color color, string text, ImFontPtr font) {
+            AddTextToDrawList(drawList, position, color, text, font, ImGui.GetFontSize());
+        }
+
+        protected unsafe void AddTextToDrawList(ImDrawListPtr drawList, Vector2 position, Color color, string text, ImFontPtr font, float fontSize) {
             uint col = ColorRGBA(color.R, color.G, color.B, color.A);
             position = SnapTextPosition(position);
-            if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                drawList.AddText(font, font.FontSize, position, col, text);
+            if(!font.IsNull) {
+                drawList.AddText(font, fontSize, position, col, text);
             }
             else {
                 drawList.AddText(position, col, text);
             }
         }
 
-        public unsafe void DrawIconGlyph(Vector2 position, uint color, string glyph, IconSize size) {
+        public void DrawIconGlyph(Vector2 position, uint color, string glyph, IconSize size) {
             AddIconGlyphToDrawList(_drawList, position, color, glyph, size);
         }
 
         protected unsafe void AddIconGlyphToDrawList(ImDrawListPtr drawList, Vector2 position, uint color, string glyph, IconSize size) {
-            var font = GetIconFont(size);
-            if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                drawList.AddText(font, font.FontSize, position, color, glyph);
+            if(!font.IsNull) {
+                drawList.AddText(font, GetScaledFontSize(GetIconFontSize(size)), position, color, glyph);
             }
             else {
                 drawList.AddText(position, color, glyph);
@@ -545,6 +389,17 @@ namespace SKFramework {
             }
         }
 
+        // Draws text with an explicit font + size onto a draw list. Wraps the ImFontPtr->ImFont* conversion so
+        // consumer projects don't need an unsafe context (Hexa's AddText only exposes the ImFont* overload).
+        public static unsafe void DrawListAddText(ImDrawListPtr drawList, ImFontPtr font, float fontSize, Vector2 position, uint color, string text) {
+            drawList.AddText(font, fontSize, position, color, text);
+        }
+
+        // Wraps a backend texture handle (ID3D11ShaderResourceView pointer) as a 1.92 ImTextureRef.
+        public static unsafe ImTextureRef ToTextureRef(nint handle) {
+            return new ImTextureRef(null, new ImTextureID(handle));
+        }
+
         public void DrawImage(string imagePath, string imageName, Vector2 position, Vector2 size) {
             if(string.IsNullOrWhiteSpace(imagePath) || size.X <= 0f || size.Y <= 0f) {
                 return;
@@ -555,7 +410,7 @@ namespace SKFramework {
                 return;
             }
 
-            _drawList.AddImage(texture, position, position + size);
+            _drawList.AddImage(ToTextureRef(texture), position, position + size);
         }
 
         public static uint ColorRGBA(byte r, byte g, byte b, byte a = 255) {

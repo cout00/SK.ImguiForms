@@ -1,5 +1,5 @@
-﻿namespace SK.ImguiForms {
-    using ImGuiNET;
+namespace SK.ImguiForms {
+    using Hexa.NET.ImGui;
     using ImDrawIdx = System.UInt16;
     using Vortice.DXGI;
     using Vortice.Direct3D;
@@ -29,10 +29,17 @@
             public bool FontTextureRegistered { get; init; }
         }
 
+        // Dear ImGui 1.92 dynamic textures: each texture (font atlas, user image) is a GPU resource we
+        // create/update/destroy on demand from ImDrawData.Textures. We keep both the texture and its SRV —
+        // the SRV is bound at draw time; the texture is needed for partial UpdateSubresource uploads.
+        sealed class TextureEntry {
+            public ID3D11Texture2D Texture;
+            public ID3D11ShaderResourceView Srv;
+        }
+
         const int VertexConstantBufferSize = 16 * 4;
-        const int MaxD3D10TextureDimension = 8192;
-        const int MaxFontTextureWidth = MaxD3D10TextureDimension;
-        readonly IntPtr context;
+        const int MaxTextureDimension = 16384; // D3D11 feature level 11 max (2D texture U/V)
+        readonly ImGuiContextPtr context;
 
         ID3D11Device device;
         ID3D11DeviceContext deviceContext;
@@ -49,7 +56,7 @@
         ID3D11BlendState blendState;
         ID3D11DepthStencilState depthStencilState;
         int vertexBufferSize = 5000, indexBufferSize = 10000;
-        readonly Dictionary<IntPtr, ID3D11ShaderResourceView> textureResources = new();
+        readonly Dictionary<IntPtr, TextureEntry> textureResources = new();
 
         public ImGuiRenderer(ID3D11Device device, ID3D11DeviceContext deviceContext, int width, int height) {
             this.device = device;
@@ -62,19 +69,23 @@
                 context = ImGui.CreateContext();
                 ImGui.SetCurrentContext(context);
                 var io = ImGui.GetIO();
-                io.BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset;  // We can honor the ImDrawCmd::VtxOffset field, allowing for large meshes.
+                io.BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset;  // honor ImDrawCmd::VtxOffset (large meshes)
+                io.BackendFlags |= ImGuiBackendFlags.RendererHasTextures;   // 1.92 dynamic texture management
                 io.ConfigFlags |= ImGuiConfigFlags.NavEnableKeyboard;
                 io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
+                var platformIo = ImGui.GetPlatformIO();
+                platformIo.RendererTextureMaxWidth = MaxTextureDimension;
+                platformIo.RendererTextureMaxHeight = MaxTextureDimension;
                 ImGui.StyleColorsDark();
                 this.Resize(width, height);
                 this.CreateDeviceObjects();
             }
         }
 
-        public IntPtr Context => context;
+        public ImGuiContextPtr Context => context;
 
         public void MakeCurrent() {
-            if(ImGui.GetCurrentContext() != context) {
+            if(ImGui.GetCurrentContext().Handle != context.Handle) {
                 ImGui.SetCurrentContext(context);
             }
         }
@@ -99,6 +110,17 @@
                     return;
 
                 ID3D11DeviceContext ctx = deviceContext;
+
+                // 1.92: service pending texture create/update/destroy requests before drawing.
+                var textures = data.Textures;
+                if((nint)textures.Data != 0) {
+                    for(int i = 0; i < textures.Size; i++) {
+                        var tex = textures.Data[i];
+                        if(tex.Status != ImTextureStatus.Ok) {
+                            UpdateTexture(tex);
+                        }
+                    }
+                }
 
                 if(vertexBuffer == null || vertexBufferSize < data.TotalVtxCount) {
                     vertexBuffer?.Release();
@@ -132,7 +154,7 @@
                 var vertexResourcePointer = (ImDrawVert*)vertexResource.DataPointer;
                 var indexResourcePointer = (ImDrawIdx*)indexResource.DataPointer;
                 for(int n = 0; n < data.CmdListsCount; n++) {
-                    var cmdlList = data.CmdLists[n];
+                    var cmdlList = data.CmdLists.Data[n];
 
                     var vertBytes = cmdlList.VtxBuffer.Size * sizeof(ImDrawVert);
                     Buffer.MemoryCopy((void*)cmdlList.VtxBuffer.Data, vertexResourcePointer, vertBytes, vertBytes);
@@ -147,8 +169,6 @@
                 ctx.Unmap(indexBuffer, 0);
 
                 // Setup orthographic projection matrix into our constant buffer
-                // Our visible imgui space lies from draw_data.DisplayPos (top left) to draw_data.DisplayPos+data_data.DisplaySize (bottom right). DisplayPos is (0,0) for single viewport apps.
-
                 var constResource = ctx.Map(constantBuffer, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
                 var span = constResource.AsSpan<float>(VertexConstantBufferSize);
                 float L = data.DisplayPos.X;
@@ -164,17 +184,15 @@
             };
                 mvp.CopyTo(span);
                 ctx.Unmap(constantBuffer, 0);
-                //BackupDX11State(ctx); // only required if imgui is injected + drawn on existing process.
                 SetupRenderState(data, ctx);
-                // Render command lists
-                // (Because we merged all buffers into a single one, we maintain our own offset into them)
+                // Render command lists (single merged buffer, maintain our own offsets)
                 int global_idx_offset = 0;
                 int global_vtx_offset = 0;
                 for(int n = 0; n < data.CmdListsCount; n++) {
-                    var cmdList = data.CmdLists[n];
+                    var cmdList = data.CmdLists.Data[n];
                     for(int i = 0; i < cmdList.CmdBuffer.Size; i++) {
-                        var cmd = cmdList.CmdBuffer[i];
-                        if(cmd.UserCallback != IntPtr.Zero) {
+                        var cmd = cmdList.CmdBuffer.Data[i];
+                        if(cmd.UserCallback != null) {
                             throw new NotImplementedException("user callbacks not implemented");
                         }
                         else {
@@ -189,8 +207,8 @@
 
                             ctx.RSSetScissorRect(new Vortice.RawRect(clipMinX, clipMinY, clipMaxX, clipMaxY));
 
-                            if(textureResources.TryGetValue(cmd.GetTexID(), out var texture)) {
-                                ctx.PSSetShaderResource(0, texture);
+                            if(textureResources.TryGetValue((nint)cmd.GetTexID().Handle, out var entry)) {
+                                ctx.PSSetShaderResource(0, entry.Srv);
                             }
 
                             ctx.DrawIndexed((int)cmd.ElemCount, (int)(cmd.IdxOffset + global_idx_offset), (int)(cmd.VtxOffset + global_vtx_offset));
@@ -199,8 +217,37 @@
                     global_idx_offset += cmdList.IdxBuffer.Size;
                     global_vtx_offset += cmdList.VtxBuffer.Size;
                 }
+            }
+        }
 
-                //RestoreDX11State(ctx); // only required if imgui is injected + drawn on existing process.
+        // Implements the Dear ImGui 1.92 backend texture protocol (see imgui_impl_dx11.cpp).
+        void UpdateTexture(ImTextureDataPtr tex) {
+            if(tex.Status == ImTextureStatus.WantCreate) {
+                var texDesc = new Texture2DDescription(Format.R8G8B8A8_UNorm, tex.Width, tex.Height, 1, 1);
+                var subResource = new SubresourceData((IntPtr)tex.GetPixels(), tex.Width * 4);
+                var texture = device.CreateTexture2D(texDesc, new[] { subResource });
+                var resViewDesc = new ShaderResourceViewDescription(texture, ShaderResourceViewDimension.Texture2D, Format.R8G8B8A8_UNorm, 0, texDesc.MipLevels);
+                var srv = device.CreateShaderResourceView(texture, resViewDesc);
+                var id = RegisterTexture(texture, srv);
+                tex.SetTexID(new ImTextureID(id));
+                tex.SetStatus(ImTextureStatus.Ok);
+            }
+            else if(tex.Status == ImTextureStatus.WantUpdates) {
+                if(textureResources.TryGetValue((nint)tex.GetTexID().Handle, out var entry) && entry.Texture != null) {
+                    var updates = tex.Updates;
+                    var pitch = tex.GetPitch();
+                    for(int u = 0; u < updates.Size; u++) {
+                        var r = updates.Data[u];
+                        var box = new Box(r.X, r.Y, 0, r.X + r.W, r.Y + r.H, 1);
+                        deviceContext.UpdateSubresource(entry.Texture, 0, box, (IntPtr)tex.GetPixelsAt(r.X, r.Y), pitch, 0);
+                    }
+                }
+                tex.SetStatus(ImTextureStatus.Ok);
+            }
+            else if(tex.Status == ImTextureStatus.WantDestroy && tex.UnusedFrames > 0) {
+                DeRegisterTexture((nint)tex.GetTexID().Handle);
+                tex.SetTexID(ImTextureID.Null);
+                tex.SetStatus(ImTextureStatus.Destroyed);
             }
         }
 
@@ -233,17 +280,15 @@
         public FrameDiagnostics CaptureFrameDiagnostics() {
             lock(ImGuiContextSync.SyncRoot) {
                 MakeCurrent();
-                var io = ImGui.GetIO();
                 var drawData = ImGui.GetDrawData();
-                var fontTextureId = io.Fonts.TexID;
-                var hasDrawData = drawData.NativePtr != null;
+                var hasDrawData = (nint)drawData.Handle != 0;
                 return new FrameDiagnostics {
                     CmdListsCount = hasDrawData ? drawData.CmdListsCount : 0,
                     TotalVtxCount = hasDrawData ? drawData.TotalVtxCount : 0,
                     TotalIdxCount = hasDrawData ? drawData.TotalIdxCount : 0,
                     DisplaySize = hasDrawData ? drawData.DisplaySize : Vector2.Zero,
-                    FontTextureId = fontTextureId,
-                    FontTextureRegistered = fontTextureId != IntPtr.Zero && this.textureResources.ContainsKey(fontTextureId)
+                    FontTextureId = IntPtr.Zero,
+                    FontTextureRegistered = textureResources.Count > 0
                 };
             }
         }
@@ -256,29 +301,28 @@
 
             using MemoryHandle imageMemoryHandle = memory.Pin();
             var subResource = new SubresourceData(imageMemoryHandle.Pointer, texDesc.Width * 4);
-            using var texture = device.CreateTexture2D(texDesc, new[] { subResource });
+            var texture = device.CreateTexture2D(texDesc, new[] { subResource });
             var resViewDesc = new ShaderResourceViewDescription(texture, ShaderResourceViewDimension.Texture2D, format, 0, texDesc.MipLevels);
-            return RegisterTexture(device.CreateShaderResourceView(texture, resViewDesc));
+            return RegisterTexture(texture, device.CreateShaderResourceView(texture, resViewDesc));
         }
 
         public bool RemoveImageTexture(IntPtr handle) {
-            using var tex = this.DeRegisterTexture(handle);
-            return tex != null;
+            return DeRegisterTexture(handle);
         }
 
+        // Loads/replaces the font set in this context's atlas. The GPU texture itself is created lazily by the
+        // per-frame texture loop above (1.92), so no atlas rasterization happens here.
         public void UpdateFontTexture(FontHelper.FontLoadDelegate fontLoadFunc) {
             lock(ImGuiContextSync.SyncRoot) {
                 MakeCurrent();
                 var io = ImGui.GetIO();
-                this.DeRegisterTexture(io.Fonts.TexID)?.Dispose();
                 io.Fonts.Clear();
-                var config = ImGuiNative.ImFontConfig_ImFontConfig();
-                config->PixelSnapH = 1;
-                config->OversampleH = 2;
-                config->OversampleV = 1;
+                var config = ImGui.ImFontConfig();
+                config.PixelSnapH = true;
+                config.OversampleH = 2;
+                config.OversampleV = 1;
                 fontLoadFunc(config);
-                this.CreateFontsTexture();
-                ImGuiNative.ImFontConfig_destroy(config);
+                config.Destroy();
             }
         }
 
@@ -304,29 +348,6 @@
             ctx.RSSetState(rasterizerState);
         }
 
-        void CreateFontsTexture() {
-            var io = ImGui.GetIO();
-            io.Fonts.TexDesiredWidth = MaxFontTextureWidth;
-            io.Fonts.GetTexDataAsRGBA32(out byte* pixels, out var width, out var height);
-            if(width > MaxD3D10TextureDimension || height > MaxD3D10TextureDimension) {
-                throw new InvalidOperationException(
-                    $"ImGui font atlas is too large for Direct3D 10 texture limits: {width}x{height}. " +
-                    $"Reduce loaded glyph ranges or font raster scale.");
-            }
-
-            var texDesc = new Texture2DDescription(Format.R8G8B8A8_UNorm, width, height, 1, 1);
-            var subResource = new SubresourceData(pixels, texDesc.Width * 4);
-            using var texture = device.CreateTexture2D(texDesc, new[] { subResource });
-            var resViewDesc = new ShaderResourceViewDescription(
-                texture,
-                ShaderResourceViewDimension.Texture2D,
-                Format.R8G8B8A8_UNorm,
-                0,
-                texDesc.MipLevels);
-            io.Fonts.SetTexID(RegisterTexture(device.CreateShaderResourceView(texture, resViewDesc)));
-            io.Fonts.ClearTexData();
-        }
-
         void CreateFontSampler() {
             var samplerDesc = new SamplerDescription(
                 Filter.MinMagMipLinear,
@@ -342,23 +363,25 @@
             this.fontSampler = device.CreateSamplerState(samplerDesc);
         }
 
-        IntPtr RegisterTexture(ID3D11ShaderResourceView texture) {
-            var imguiID = texture.NativePointer;
-            textureResources.TryAdd(imguiID, texture);
+        IntPtr RegisterTexture(ID3D11Texture2D texture, ID3D11ShaderResourceView srv) {
+            var imguiID = srv.NativePointer;
+            textureResources[imguiID] = new TextureEntry { Texture = texture, Srv = srv };
             return imguiID;
         }
 
-        ID3D11ShaderResourceView? DeRegisterTexture(IntPtr texturePtr) {
-            if(textureResources.Remove(texturePtr, out var texture)) {
-                return texture;
+        bool DeRegisterTexture(IntPtr texturePtr) {
+            if(textureResources.Remove(texturePtr, out var entry)) {
+                entry.Srv?.Release();
+                entry.Texture?.Release();
+                return true;
             }
 
-            return null;
+            return false;
         }
 
         void DeRegisterAllTexture() {
             foreach(var key in textureResources.Keys.ToArray()) {
-                this.DeRegisterTexture(key)?.Release();
+                this.DeRegisterTexture(key);
             }
         }
 
@@ -448,101 +471,8 @@
             var depthDesc = new DepthStencilDescription(false, DepthWriteMask.All, ComparisonFunction.Always);
             depthStencilState = device.CreateDepthStencilState(depthDesc);
 
-            this.CreateFontsTexture();
             this.CreateFontSampler();
         }
-
-#if false
-        void BackupDX11State(ID3D11DeviceContext ctx)
-        {
-            old.ScissorRectsCount = ctx.RSGetScissorRects();
-            if (old.ScissorRectsCount > 0)
-            {
-                ctx.RSGetScissorRects(ref old.ScissorRectsCount, old.ScissorRects);
-            }
-
-            old.ViewportsCount = ctx.RSGetViewports();
-            if (old.ViewportsCount > 0)
-            {
-                ctx.RSGetScissorRects(ref old.ViewportsCount, old.ScissorRects);
-            }
-
-            old.RS = ctx.RSGetState();
-            old.BlendState = ctx.OMGetBlendState(out old.BlendFactor, out old.SampleMask);
-            ctx.OMGetDepthStencilState(out old.DepthStencilState, out old.StencilRef);
-            ctx.PSGetShaderResources(0, old.PSShaderResource);
-            ctx.PSGetSamplers(0, old.PSSampler);
-            ctx.PSGetShader(out old.PS, old.PSInstances, ref old.PSInstancesCount);
-            ctx.VSGetShader(out old.VS, old.VSInstances, ref old.VSInstancesCount);
-            ctx.VSGetConstantBuffers(0, old.VSConstantBuffer);
-            ctx.GSGetShader(out old.GS, old.GSInstances, ref old.GSInstancesCount);
-            old.PrimitiveTopology = ctx.IAGetPrimitiveTopology();
-            ctx.IAGetIndexBuffer(out old.IndexBuffer, out old.IndexBufferFormat, out old.IndexBufferOffset);
-            ctx.IAGetVertexBuffers(0, 1, old.VertexBuffer, old.VertexBufferStride, old.VertexBufferOffset);
-            old.InputLayout = ctx.IAGetInputLayout();
-        }
-
-        void RestoreDX11State(ID3D11DeviceContext ctx)
-        {
-            ctx.RSSetScissorRects(old.ScissorRects);
-            ctx.RSSetViewports(old.Viewports);
-            ctx.RSSetState(old.RS);
-            old.RS?.Release();
-            ctx.OMSetBlendState(old.BlendState, old.BlendFactor, old.SampleMask);
-            old.BlendState?.Release();
-            ctx.OMSetDepthStencilState(old.DepthStencilState, old.StencilRef);
-            old.DepthStencilState?.Release();
-            ctx.PSSetShaderResources(0, old.PSShaderResource);
-            old.PSShaderResource[0]?.Release();
-            ctx.PSSetSamplers(0, old.PSSampler);
-            old.PSSampler[0]?.Release();
-            ctx.PSSetShader(old.PS, old.PSInstances, old.PSInstancesCount);
-            old.PS?.Release();
-            for (int i = 0; i < old.PSInstancesCount; i++) old.PSInstances[i]?.Release();
-            ctx.VSSetShader(old.VS, old.VSInstances, old.VSInstancesCount);
-            old.VS?.Release();
-            ctx.VSSetConstantBuffers(0, old.VSConstantBuffer);
-            old.VSConstantBuffer[0]?.Release();
-            ctx.GSSetShader(old.GS, old.GSInstances, old.GSInstancesCount);
-            for (int i = 0; i < old.VSInstancesCount; i++) old.VSInstances[i]?.Release();
-            ctx.IASetPrimitiveTopology(old.PrimitiveTopology);
-            ctx.IASetIndexBuffer(old.IndexBuffer, old.IndexBufferFormat, old.IndexBufferOffset);
-            old.IndexBuffer?.Release();
-            ctx.IASetVertexBuffers(0, 1, old.VertexBuffer, old.VertexBufferStride, old.VertexBufferOffset);
-            old.VertexBuffer[0]?.Release();
-            ctx.IASetInputLayout(old.InputLayout);
-            old.InputLayout?.Release();
-        }
-
-        class BACKUP_DX11_STATE
-        {
-            public int ScissorRectsCount = 0, ViewportsCount = 0;
-            public RawRect[] ScissorRects = new RawRect[16];
-            public Viewport[] Viewports = new Viewport[16];
-            public ID3D11RasterizerState RS = default;
-            public ID3D11BlendState BlendState = default;
-            public Color4 BlendFactor = default;
-            public int SampleMask = 0;
-            public int StencilRef = 0;
-            public ID3D11DepthStencilState DepthStencilState = default;
-            public ID3D11ShaderResourceView[] PSShaderResource = new ID3D11ShaderResourceView[1];
-            public ID3D11SamplerState[] PSSampler = new ID3D11SamplerState[1];
-            public ID3D11PixelShader PS = default;
-            public ID3D11VertexShader VS = default;
-            public ID3D11GeometryShader GS = default;
-            public int PSInstancesCount = 256, VSInstancesCount = 256, GSInstancesCount = 256;
-            public ID3D11ClassInstance[] PSInstances = new ID3D11ClassInstance[256];
-            public ID3D11ClassInstance[] VSInstances = new ID3D11ClassInstance[256];
-            public ID3D11ClassInstance[] GSInstances = new ID3D11ClassInstance[256];
-            public PrimitiveTopology PrimitiveTopology = 0;
-            public ID3D11Buffer IndexBuffer = default;
-            public ID3D11Buffer[] VertexBuffer = new ID3D11Buffer[1], VSConstantBuffer = new ID3D11Buffer[1];
-            public int IndexBufferOffset = 0;
-            public int[] VertexBufferStride = new int[1], VertexBufferOffset = new int[1];
-            public Format IndexBufferFormat = 0;
-            public ID3D11InputLayout InputLayout = default;
-        } readonly BACKUP_DX11_STATE old = new();
-#endif
     }
 
 }

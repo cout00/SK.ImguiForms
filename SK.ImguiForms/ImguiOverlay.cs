@@ -1,8 +1,8 @@
-﻿namespace SK.ImguiForms {
+namespace SK.ImguiForms {
     using System;
     using System.Diagnostics;
     using System.Drawing;
-    using ImGuiNET;
+    using Hexa.NET.ImGui;
     using SK.ImguiForms.Win32;
     using SKFramework;
 

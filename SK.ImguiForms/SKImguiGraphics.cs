@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SK.ImguiForms;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -11,11 +11,11 @@ namespace SKFramework {
         public SKImguiGraphics(ImguiWindow overlay) : base(overlay) {
         }
 
-        public unsafe void ImguiUIDrawText(ImDrawListPtr drawList, Vector2 position, Color color, string text, float fontSize) {
-            ImguiUIDrawText(drawList, position, color, text, GetTextFont(fontSize));
+        public void ImguiUIDrawText(ImDrawListPtr drawList, Vector2 position, Color color, string text, float fontSize) {
+            AddTextToDrawList(drawList, position, color, text, GetTextFont(fontSize), GetResolvedTextFontSize(fontSize));
         }
 
-        public unsafe void ImguiUIDrawText(ImDrawListPtr drawList, Vector2 position, Color color, string text, ImFontPtr font) {
+        public void ImguiUIDrawText(ImDrawListPtr drawList, Vector2 position, Color color, string text, ImFontPtr font) {
             AddTextToDrawList(drawList, position, color, text, font);
         }
 
@@ -30,8 +30,8 @@ namespace SKFramework {
         public unsafe void DrawIcon(int iconNumber, float fontSize) {
             var glyph = GetIconGlyph(iconNumber);
             var font = GetIconFont(fontSize);
-            if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                ImGui.PushFont(font);
+            if(!font.IsNull) {
+                ImGui.PushFont(font, GetResolvedTextFontSize(fontSize));
                 ImGui.TextUnformatted(glyph);
                 ImGui.PopFont();
                 return;
@@ -48,8 +48,8 @@ namespace SKFramework {
             var glyph = GetIconGlyph(iconNumber);
             var font = GetIconFont(fontSize);
             bool pressed;
-            if((IntPtr)font.NativePtr != IntPtr.Zero) {
-                ImGui.PushFont(font);
+            if(!font.IsNull) {
+                ImGui.PushFont(font, GetResolvedTextFontSize(fontSize));
                 pressed = ImGui.Button($"{glyph}##{id}", buttonSize);
                 ImGui.PopFont();
             }
@@ -91,7 +91,7 @@ namespace SKFramework {
         public void DrawImguiImage(string key, SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgba32> image, Size size) {
             overlay.AddOrGetImagePointer(key, image, false, out var imagePointer);
             if(imagePointer != 0) {
-                ImGui.Image(imagePointer, new Vector2(size.Width, size.Height));
+                ImGui.Image(ToTextureRef(imagePointer), new Vector2(size.Width, size.Height));
             }
         }
 
@@ -127,14 +127,14 @@ namespace SKFramework {
 
             if(HaveTexture(imageName)) {
                 var imageId = GetTexturePointer(imageName);
-                ImGui.Image(imageId, displaySize);
+                ImGui.Image(ToTextureRef(imageId), displaySize);
                 return;
             }
 
             using(var imageStream = File.OpenRead(imagePath)) {
                 var image = SixLabors.ImageSharp.Image.Load<Rgba32>(imageStream);
                 overlay.AddOrGetImagePointer(imageName, image, false, out var imagePointer);
-                ImGui.Image(imagePointer, displaySize);
+                ImGui.Image(ToTextureRef(imagePointer), displaySize);
             }
         }
 
@@ -148,7 +148,7 @@ namespace SKFramework {
                 return;
             }
 
-            drawList.AddImage(texture, position, position + size);
+            drawList.AddImage(ToTextureRef(texture), position, position + size);
         }
 
         static float GetResolvedIconFontSize(IconSize size) {

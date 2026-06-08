@@ -1,4 +1,4 @@
-﻿namespace SK.ImguiForms {
+namespace SK.ImguiForms {
     using SK.ImguiForms.Win32;
     using SixLabors.ImageSharp;
     using SixLabors.ImageSharp.Formats;
@@ -13,7 +13,7 @@
     using System.Runtime.CompilerServices;
     using System.Threading;
     using System.Threading.Tasks;
-    using ImGuiNET;
+    using Hexa.NET.ImGui;
     using Vortice.Direct3D;
     using Vortice.Direct3D11;
     using Vortice.DXGI;
@@ -64,7 +64,7 @@
         float currentDpiScale;
         float userInterfaceScale;
         float appliedStyleScale;
-        FontHelper.FontLoadDelegate activeFontLoadDelegate;
+        const float BaseUiFontSize = 20f;
         ImguiInterfaceSize interfaceSize;
 
         protected ImguiWindow(string windowTitle, bool dpiAware = false, int initialWindowWidth = 800, int initialWindowHeight = 600) {
@@ -216,59 +216,6 @@
 
         public float ScaleFontSize(float size) {
             return MathF.Max(1f, MathF.Round(size * EffectiveUiScale));
-        }
-
-        public unsafe bool ReplaceFont(string pathName, int size, FontGlyphRangeType language) {
-            if(!File.Exists(pathName)) {
-                return false;
-            }
-
-            FontHelper.FontLoadDelegate fontLoadDelegate = config => {
-                var io = ImGui.GetIO();
-                var glyphRange = language switch {
-                    FontGlyphRangeType.English => io.Fonts.GetGlyphRangesDefault(),
-                    FontGlyphRangeType.ChineseSimplifiedCommon => io.Fonts.GetGlyphRangesChineseSimplifiedCommon(),
-                    FontGlyphRangeType.ChineseFull => io.Fonts.GetGlyphRangesChineseFull(),
-                    FontGlyphRangeType.Japanese => io.Fonts.GetGlyphRangesJapanese(),
-                    FontGlyphRangeType.Korean => io.Fonts.GetGlyphRangesKorean(),
-                    FontGlyphRangeType.Thai => io.Fonts.GetGlyphRangesThai(),
-                    FontGlyphRangeType.Vietnamese => io.Fonts.GetGlyphRangesVietnamese(),
-                    FontGlyphRangeType.Cyrillic => io.Fonts.GetGlyphRangesCyrillic(),
-                    _ => throw new InvalidOperationException($"Font glyph range '{language}' is not supported.")
-                };
-
-                io.Fonts.AddFontFromFileTTF(pathName, ScaleFontSize(size), config, glyphRange);
-                ImGuiNative.igGetIO()->FontDefault = null;
-            };
-
-            return QueueFontUpdate(fontLoadDelegate);
-        }
-
-        public unsafe bool ReplaceFont(string pathName, int size, ushort[] glyphRange) {
-            if(!File.Exists(pathName) || glyphRange == null || glyphRange.Length == 0) {
-                return false;
-            }
-
-            FontHelper.FontLoadDelegate fontLoadDelegate = config => {
-                var io = ImGui.GetIO();
-                fixed(ushort* glyphRangePointer = &glyphRange[0]) {
-                    io.Fonts.AddFontFromFileTTF(pathName, ScaleFontSize(size), config, new IntPtr(glyphRangePointer));
-                    ImGuiNative.igGetIO()->FontDefault = null;
-                }
-            };
-
-            return QueueFontUpdate(fontLoadDelegate);
-        }
-
-        public unsafe bool ReplaceFont() {
-            FontHelper.FontLoadDelegate fontLoadDelegate = config => {
-                var io = ImGui.GetIO();
-                config->SizePixels = ScaleFontSize(13f);
-                io.Fonts.AddFontDefault(config);
-                ImGuiNative.igGetIO()->FontDefault = null;
-            };
-
-            return QueueFontUpdate(fontLoadDelegate);
         }
 
         public bool ReplaceFont(FontHelper.FontLoadDelegate fontLoadDelegate) {
@@ -640,7 +587,7 @@
                 WindowExStyle);
 
             renderer = new ImGuiRenderer(device, deviceContext, initialWindowWidth, initialWindowHeight);
-            inputHandler = new ImGuiInputHandler(Window.Handle, () => renderer != null ? renderer.Context : IntPtr.Zero);
+            inputHandler = new ImGuiInputHandler(Window.Handle, () => renderer != null ? renderer.Context : default);
 
             OnWindowCreated();
             UpdateDpiScale(styleIsUnscaled: true);
@@ -954,13 +901,10 @@
             userInterfaceScale = normalizedScale;
             if(renderer != null) {
                 UpdateDpiScale();
-                if(IsReady) {
-                    QueueActiveFontReloadForDpi();
-                }
             }
         }
 
-        void UpdateDpiScale(bool styleIsUnscaled = false) {
+        unsafe void UpdateDpiScale(bool styleIsUnscaled = false) {
             lock(ImGuiContextSync.SyncRoot) {
                 if(renderer == null) {
                     return;
@@ -977,9 +921,6 @@
                 currentDpiScale = dpiScale;
                 renderer.MakeCurrent();
 
-                var io = ImGui.GetIO();
-                io.FontGlobalScale = 1f;
-
                 var style = ImGui.GetStyle();
                 var styleScaleFactor = styleIsUnscaled
                     ? effectiveScale
@@ -990,12 +931,13 @@
                     style.ScaleAllSizes(styleScaleFactor);
                 }
 
-                appliedStyleScale = effectiveScale;
-                if(IsReady) {
-                    QueueActiveFontReloadForDpi();
-                }
+                // Dear ImGui 1.92: fonts are scalable, so scale text by the base font size rather than
+                // rebuilding the atlas. DPI and the user interface-size preset both fold into effectiveScale.
+                style.FontSizeBase = BaseUiFontSize * effectiveScale;
 
-                if(previousContext != IntPtr.Zero && previousContext != renderer.Context) {
+                appliedStyleScale = effectiveScale;
+
+                if(previousContext.Handle != null && previousContext.Handle != renderer.Context.Handle) {
                     ImGui.SetCurrentContext(previousContext);
                 }
             }
@@ -1006,7 +948,6 @@
                 return false;
             }
 
-            activeFontLoadDelegate = fontLoadDelegate;
             fontUpdates.Enqueue(fontLoadDelegate);
             return true;
         }
@@ -1087,12 +1028,6 @@
 
             while(fontUpdates.TryDequeue(out var fontUpdate)) {
                 renderer.UpdateFontTexture(fontUpdate);
-            }
-        }
-
-        void QueueActiveFontReloadForDpi() {
-            if(activeFontLoadDelegate != null) {
-                fontUpdates.Enqueue(activeFontLoadDelegate);
             }
         }
 

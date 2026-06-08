@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SKFramework;
 
 namespace SK.ImguiForms.Example;
