@@ -1,4 +1,4 @@
-namespace SK.ImguiForms {
+﻿namespace SK.ImguiForms {
     using SK.ImguiForms.Win32;
     using SixLabors.ImageSharp;
     using SixLabors.ImageSharp.Formats;
@@ -630,11 +630,13 @@ namespace SK.ImguiForms {
         }
 
         void WaitForFrameBudget(long frameStartTimestamp, int effectiveFpsLimit) {
-            var frameBudgetTicks = Stopwatch.Frequency / effectiveFpsLimit;
+            var frequency = Stopwatch.Frequency;
+            var frameBudgetTicks = frequency / effectiveFpsLimit;
             var targetTimestamp = frameStartTimestamp + frameBudgetTicks;
 
             if(!SmoothFramePacing) {
-                var remainingMs = (int)((targetTimestamp - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency);
+                var remainingTicks = targetTimestamp - Stopwatch.GetTimestamp();
+                var remainingMs = (int)(remainingTicks * 1000 / frequency);
                 if(remainingMs > 0) {
                     Thread.Sleep(remainingMs);
                 }
@@ -642,21 +644,23 @@ namespace SK.ImguiForms {
                 return;
             }
 
+            var sleepThresholdTicks = frequency / 500;   // 2.0 ms
+            var yieldThresholdTicks = frequency / 2000;  // 0.5 ms
+
             while(true) {
                 var remainingTicks = targetTimestamp - Stopwatch.GetTimestamp();
                 if(remainingTicks <= 0) {
                     return;
                 }
 
-                var remainingMs = remainingTicks * 1000.0 / Stopwatch.Frequency;
-                if(remainingMs > 2.0) {
+                if(remainingTicks > sleepThresholdTicks) {
                     Thread.Sleep(1);
                 }
-                else if(remainingMs > 0.5) {
+                else if(remainingTicks > yieldThresholdTicks) {
                     Thread.Yield();
                 }
                 else {
-                    Thread.SpinWait(10);
+                    Thread.SpinWait(1);
                 }
             }
         }
