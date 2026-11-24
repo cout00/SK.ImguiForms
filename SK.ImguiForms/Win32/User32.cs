@@ -159,6 +159,7 @@ namespace SK.ImguiForms.Win32
         ExitSizeMove = 0x0232,
         Sizing = 0x0214,
         DeviceChange = 0x0219,
+        WtsSessionChange = 0x02B1,
         DpiChanged = 0x02E0
     }
 
@@ -1173,6 +1174,20 @@ namespace SK.ImguiForms.Win32
         [return: MarshalAs(UnmanagedType.Bool)]
         [DllImport(LibraryName, ExactSpelling = true)]
         public static extern bool TranslateMessage([In] ref Message lpMsg);
+
+        // Message-aware wait: returns when one of the handles is signaled, when input matching
+        // dwWakeMask arrives (MWMO_INPUTAVAILABLE: also input already queued), or after dwMilliseconds.
+        public const uint INFINITE = 0xFFFFFFFF;
+        public const uint QS_ALLINPUT = 0x04FF;
+        public const uint MWMO_INPUTAVAILABLE = 0x0004;
+
+        [DllImport(LibraryName, ExactSpelling = true)]
+        public static extern uint MsgWaitForMultipleObjectsEx(
+            uint nCount,
+            IntPtr pHandles,
+            uint dwMilliseconds,
+            uint dwWakeMask,
+            uint dwFlags);
 
         [DllImport(LibraryName, CharSet = CharSet.Unicode)]
         public static extern IntPtr DispatchMessage([In] ref Message lpmsg);

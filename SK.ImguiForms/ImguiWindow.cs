@@ -61,6 +61,17 @@
         long frameTimingMaxTotalTicks;
         int isRenderingFrame;
         volatile bool acceptsWindowMessages;
+
+        // Wakes the loop out of its idle wait (Close, queued font updates, WakeLoop).
+        readonly AutoResetEvent loopWakeEvent = new(false);
+
+        // WTS connect state of this process's session, re-read at most once per SessionStateRefreshMs
+        // and immediately after a WM_WTSSESSION_CHANGE.
+        const long SessionStateRefreshMs = 1000;
+        bool hasSessionState;
+        bool sessionConnected;
+        long sessionStateReadTick;
+        bool sessionNotificationRegistered;
         float currentDpiScale;
         float userInterfaceScale;
         float appliedStyleScale;
@@ -192,6 +203,21 @@
 
         public virtual void Close() {
             cancellationTokenSource.Cancel();
+            WakeLoop();
+        }
+
+        /// <summary>
+        /// Wakes the window loop from any thread: <see cref="OnTick"/> runs on the next pass, and a frame
+        /// is drawn if the window can be seen. Only needed for work that does not arrive as a window
+        /// message (a message posted to the window wakes the loop by itself).
+        /// </summary>
+        public void WakeLoop() {
+            try {
+                loopWakeEvent.Set();
+            }
+            catch(ObjectDisposedException) {
+                // The loop is gone; nothing to wake.
+            }
         }
 
         public void Dispose() {
@@ -290,6 +316,17 @@
 
         protected virtual Task PostInitialized() {
             return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Called once per loop pass on the window thread, after window messages are pumped and before
+        /// the frame, whether or not a frame is drawn. Put non-drawing per-frame work here (state sync,
+        /// command queues, showing/hiding the window), never ImGui calls: while the window is hidden,
+        /// minimized or its session is disconnected, <see cref="Render"/> is not called at all.
+        /// The pass rate is <see cref="GetActiveFpsLimit"/> (or message-driven when that is 0 and
+        /// nothing is drawn); call <see cref="WakeLoop"/> to run a pass sooner.
+        /// </summary>
+        protected virtual void OnTick(float deltaTime) {
         }
 
         protected virtual void OnBeforeRender() {
@@ -428,6 +465,29 @@
             return Window != null && Window.Handle != IntPtr.Zero && User32.IsIconic(Window.Handle);
         }
 
+        /// <summary>
+        /// Whether a drawn frame can be seen by anyone: the window is visible, not minimized, and the
+        /// Windows session it lives in is connected. When false the loop draws and presents nothing.
+        /// </summary>
+        protected bool IsWindowPresentable() {
+            var handle = Window?.Handle ?? IntPtr.Zero;
+            return handle != IntPtr.Zero
+                && User32.IsWindowVisible(handle)
+                && !User32.IsIconic(handle)
+                && IsSessionConnected();
+        }
+
+        bool IsSessionConnected() {
+            var now = Environment.TickCount64;
+            if(!hasSessionState || now - sessionStateReadTick >= SessionStateRefreshMs) {
+                sessionConnected = Wtsapi32.IsCurrentSessionActive();
+                sessionStateReadTick = now;
+                hasSessionState = true;
+            }
+
+            return sessionConnected;
+        }
+
         protected bool IsWindowForeground() {
             return Window != null && Window.Handle != IntPtr.Zero && User32.GetForegroundWindow() == Window.Handle;
         }
@@ -443,7 +503,7 @@
         }
 
         protected void RenderFrameImmediately() {
-            if(renderView == null) {
+            if(renderView == null || !IsWindowPresentable()) {
                 return;
             }
 
@@ -586,6 +646,10 @@
                 WindowStyle,
                 WindowExStyle);
 
+            // WM_WTSSESSION_CHANGE on connect/disconnect, so an idle loop wakes up when the session
+            // comes back instead of waiting for its next pass.
+            sessionNotificationRegistered = Wtsapi32.WTSRegisterSessionNotification(Window.Handle, Wtsapi32.NOTIFY_FOR_THIS_SESSION);
+
             renderer = new ImGuiRenderer(device, deviceContext, initialWindowWidth, initialWindowHeight);
             inputHandler = new ImGuiInputHandler(Window.Handle, () => renderer != null ? renderer.Context : default);
 
@@ -610,13 +674,25 @@
                 stopwatch.Restart();
 
                 Window?.PumpEvents();
+                OnTick(deltaTime);
 
-                if(ShouldRenderCurrentFrame()) {
+                // Nobody can see a frame of a hidden or minimized window, or of any window in a
+                // disconnected session, so it is neither drawn nor presented. On a machine without a
+                // GPU (WARP) drawing is the bulk of the process's CPU.
+                var drawFrame = IsWindowPresentable() && ShouldRenderCurrentFrame();
+                if(drawFrame) {
                     EnsureRenderSizeMatchesClientRect();
                     RenderFrame(Math.Max(deltaTime, 1f / 1000f), clearColor);
                 }
 
                 ReplaceFontIfRequired();
+
+                if(!drawFrame) {
+                    // No Present to pace the loop (VSync included): sleep until a window message,
+                    // WakeLoop, or the next pass of the active FPS limit.
+                    WaitForNextPass(frameStartTimestamp, GetActiveFpsLimit());
+                    continue;
+                }
 
                 if(VSync) {
                     continue;
@@ -627,6 +703,24 @@
                     WaitForFrameBudget(frameStartTimestamp, effectiveFpsLimit);
                 }
             }
+        }
+
+        // Idle wait of a loop that drew nothing. Returns on a window message (sent or posted, including
+        // one that arrived since PumpEvents), on WakeLoop, or when the pass budget of effectiveFpsLimit
+        // runs out; with effectiveFpsLimit == 0 only the first two.
+        unsafe void WaitForNextPass(long frameStartTimestamp, int effectiveFpsLimit) {
+            var timeoutMs = User32.INFINITE;
+            if(effectiveFpsLimit > 0) {
+                var remainingTicks = frameStartTimestamp + Stopwatch.Frequency / effectiveFpsLimit - Stopwatch.GetTimestamp();
+                if(remainingTicks <= 0) {
+                    return;
+                }
+
+                timeoutMs = (uint)Math.Max(1, remainingTicks * 1000 / Stopwatch.Frequency);
+            }
+
+            var wakeHandle = loopWakeEvent.SafeWaitHandle.DangerousGetHandle();
+            User32.MsgWaitForMultipleObjectsEx(1, (IntPtr)(&wakeHandle), timeoutMs, User32.QS_ALLINPUT, User32.MWMO_INPUTAVAILABLE);
         }
 
         void WaitForFrameBudget(long frameStartTimestamp, int effectiveFpsLimit) {
@@ -953,6 +1047,7 @@
             }
 
             fontUpdates.Enqueue(fontLoadDelegate);
+            WakeLoop();
             return true;
         }
 
@@ -1013,10 +1108,16 @@
             backBuffer?.Release();
             swapChain?.Release();
             renderer?.Dispose();
+            if(sessionNotificationRegistered && Window != null && Window.Handle != IntPtr.Zero) {
+                Wtsapi32.WTSUnRegisterSessionNotification(Window.Handle);
+                sessionNotificationRegistered = false;
+            }
+
             Window?.Dispose();
             deviceContext?.Release();
             device?.Release();
             cancellationTokenSource.Dispose();
+            loopWakeEvent.Dispose();
 
             if(selfPointer != IntPtr.Zero && !User32.UnregisterClass(wndClass.ClassName, selfPointer)) {
                 throw new InvalidOperationException($"Failed to unregister window class '{wndClass.ClassName}'.");
@@ -1049,6 +1150,11 @@
 
         IntPtr WndProc(IntPtr hWnd, uint messageValue, UIntPtr wParam, IntPtr lParam) {
             var message = (WindowMessage)messageValue;
+
+            if(message == WindowMessage.WtsSessionChange) {
+                // Session connected or disconnected: re-read the WTS state on the next pass.
+                hasSessionState = false;
+            }
 
             if(!acceptsWindowMessages || Window == null || Window.Handle != hWnd) {
                 if(TryHandleInitializationWindowMessage(message, wParam, lParam, out var initializationResult)) {

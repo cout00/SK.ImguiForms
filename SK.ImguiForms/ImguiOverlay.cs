@@ -22,6 +22,7 @@ namespace SK.ImguiForms {
         bool isOverlayWindowVisible;
         Rectangle currentBounds;
         bool hasCurrentBounds;
+        bool hasRenderTarget;
         ImguiOverlayAttachmentMode attachmentMode;
         Process targetProcess;
         string targetProcessName = string.Empty;
@@ -100,12 +101,19 @@ namespace SK.ImguiForms {
             }
         }
 
-        protected sealed override void Render() {
+        // Following the target (and showing/hiding the overlay with it) is window state, not drawing:
+        // it runs every pass, so a hidden overlay still notices its target appear and shows itself.
+        // An override must call base.
+        protected override void OnTick(float deltaTime) {
             var targetWindowHandle = GetTargetWindowHandle();
             var bounds = GetOverlayBounds(targetWindowHandle);
             TargetWindowHandle = targetWindowHandle;
             SyncOverlayWindow(targetWindowHandle, bounds);
-            if(targetWindowHandle == 0 || bounds.Width <= 0 || bounds.Height <= 0) {
+            hasRenderTarget = targetWindowHandle != 0 && bounds.Width > 0 && bounds.Height > 0;
+        }
+
+        protected sealed override void Render() {
+            if(!hasRenderTarget) {
                 return;
             }
 
